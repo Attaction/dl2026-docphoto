@@ -25,7 +25,21 @@ import torch.nn as nn
 class MLP(nn.Module):
     def __init__(self, in_dim: int, hidden: list[int], dropout: float = 0.3, prior: float = 0.5):
         super().__init__()
-        raise NotImplementedError("TASK 2: build the layers")
+        prev_dim = in_dim
+        layers = []
+        for h in hidden:
+            layers.append(nn.Linear(prev_dim, h))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            prev_dim = h
+
+        layers.append(nn.Linear(prev_dim, 1))
+        layers.append(nn.Sigmoid())
+
+        self.sequential = nn.Sequential(*layers)
+        with torch.no_grad():
+            import math
+            self.sequential[-2].bias.fill_(math.log(prior / (1 - prior)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("TASK 2: one number in [0, 1] per row, shape (batch,)")
+        return self.sequential(x).squeeze(dim=-1)
