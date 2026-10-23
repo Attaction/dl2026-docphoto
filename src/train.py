@@ -16,6 +16,7 @@ whole of supervised training.
 from __future__ import annotations
 
 import argparse
+import copy
 import time
 
 import numpy as np
@@ -111,12 +112,18 @@ def validate(model: torch.nn.Module, X_val: torch.Tensor, y_val: np.ndarray, ok:
 # ------------------------------------------------------------------ given
 
 def train_mlp(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarray, val_idx: np.ndarray,
-              device: str | None = None, tags: list[str] | None = None, log=print) -> dict:
+              device: str | None = None, tags: list[str] | None = None, log=print,
+              stop_idx: np.ndarray | None = None) -> dict:
     """Train on the pixel rows train_idx, validate on val_idx after every epoch, log everything.
 
     `X` is the pixel table, one row per row of `df`. Returns the history, the
     validation predictions after the first and the last epoch, the trained
     model, the checkpoint path and the W&B run page.
+
+    Early stopping, done honestly: with `stop_idx` (rows of training groups set
+    aside, not in train_idx), the weights of the epoch with the lowest RMSE on
+    those rows are kept, and `val_pred` and the checkpoint come from them. The
+    validation rows play no part in the choice.
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     set_seed(cfg["seed"])
@@ -128,6 +135,11 @@ def train_mlp(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarray,
     y_tr = to_tensor(df[config.TARGET].to_numpy()[train_idx], device)
     y_va = df[config.TARGET].to_numpy()[val_idx]
     ok = df["eval_ok"].to_numpy()[val_idx] == 1
+    if stop_idx is not None:
+        X_st = to_tensor(scaler.transform(X[stop_idx]), device)
+        y_st = df[config.TARGET].to_numpy()[stop_idx]
+        ok_st = df["eval_ok"].to_numpy()[stop_idx] == 1
+        best = (float("inf"), None, 0)
 
     model = MLP(in_dim=X.shape[1], hidden=list(cfg["model"]["hidden"]), dropout=cfg["model"]["dropout"],
                 prior=float(y_tr.mean())).to(device)
@@ -146,23 +158,37 @@ def train_mlp(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarray,
         train_eval = rmse(y_tr.cpu().numpy(), predict(model, X_tr))   # dropout off, as in validation
         row = {"epoch": epoch, "train_loss": loss, "train_rmse": train_eval, "val_rmse": val,
                "seconds": time.time() - t0}
+        if stop_idx is not None:
+            row["stop_rmse"] = validate(model, X_st, y_st, ok_st)
+            if row["stop_rmse"] < best[0]:
+                best = (row["stop_rmse"], copy.deepcopy(model.state_dict()), epoch)
         history.append(row)
-        tracking.log_metrics({"train_loss": loss, "train_rmse": train_eval, "val_rmse": val}, step=epoch)
+        tracking.log_metrics({k: v for k, v in row.items() if k not in ("epoch", "seconds")}, step=epoch)
         if epoch in (1, tr["epochs"]) or epoch % tr.get("log_every", 10) == 0:
             log(f"epoch {epoch:3d}  train loss {loss:.4f}  train RMSE {train_eval:.4f}  val RMSE {val:.4f}")
         if epoch in (1, tr["epochs"]):
             snapshots[epoch] = predict(model, X_va)
 
+    selected = tr["epochs"]
+    if stop_idx is not None:
+        model.load_state_dict(best[1])
+        selected = best[2]
+        snapshots[selected] = predict(model, X_va)
+        log(f"keeping epoch {selected}, chosen on {len(stop_idx)} set-aside training rows: "
+            f"val RMSE {validate(model, X_va, y_va, ok):.4f}")
+    final_val = validate(model, X_va, y_va, ok)
+
     ckpt = config.ROOT / "models" / f"{cfg['name']}.pt"
     ckpt.parent.mkdir(exist_ok=True)
     torch.save({"state_dict": model.state_dict(), "config": cfg, "in_dim": X.shape[1],
                 "scaler_mean": scaler.mean, "scaler_scale": scaler.scale}, ckpt)
-    tracking.log_checkpoint(ckpt, cfg["name"], {"val_rmse": history[-1]["val_rmse"]})
-    tracking.log_metrics({"final_val_rmse": history[-1]["val_rmse"]})
+    tracking.log_checkpoint(ckpt, cfg["name"], {"val_rmse": final_val, "epoch": selected})
+    tracking.log_metrics({"final_val_rmse": final_val, "selected_epoch": selected})
     url = tracking.run_url()
     tracking.finish()
-    return {"history": pd.DataFrame(history), "val_pred": snapshots[tr["epochs"]], "snapshots": snapshots,
-            "model": model, "checkpoint": ckpt, "url": url, "val_index": val_idx, "ok": ok}
+    return {"history": pd.DataFrame(history), "val_pred": snapshots[selected], "snapshots": snapshots,
+            "model": model, "checkpoint": ckpt, "url": url, "val_index": val_idx, "ok": ok,
+            "selected_epoch": selected}
 
 
 def main() -> None:

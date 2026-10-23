@@ -45,7 +45,12 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+import torch
 import yaml
+
+from src import losses
+from src.data import inputs
+from src.models.build import build_model
 
 
 def load_model(checkpoint: Path, cfg: dict):
@@ -54,22 +59,39 @@ def load_model(checkpoint: Path, cfg: dict):
     Put the model in eval mode and disable gradients. Return something callable
     that maps one preprocessed image to one float.
     """
-    raise NotImplementedError("TODO: build the model and load the checkpoint")
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    loss = losses.from_state(ckpt["loss_state"])
+    net = build_model(ckpt["config"], ckpt["in_shape"], loss)
+    net.load_state_dict(ckpt["state_dict"])
+    net.eval()
+    for p in net.parameters():
+        p.requires_grad_(False)
+
+    @torch.no_grad()
+    def model(x: torch.Tensor) -> float:
+        return float(loss.predict(net(x).float())[0])
+
+    model.checkpoint = ckpt
+    return model
 
 
-def preprocess(image_path: Path, cfg: dict):
+def preprocess(image_path: Path, cfg: dict, checkpoint: dict) -> torch.Tensor:
     """Read one image and turn it into model input.
 
     This must match training exactly. A resize or a normalisation that differs
     between training and prediction is the single most common reason a good
     validation score turns into a bad leaderboard score.
     """
-    raise NotImplementedError("TODO: load and preprocess a single image")
+    x = inputs.preprocess_one(image_path, cfg, checkpoint)
+    # training stored the pixels as uint8 (the 0.5 padding became 128/255): round to that grid too
+    sc = checkpoint["scaler"]
+    x = torch.round((x * sc["scale"] + sc["mean"]) * 255) / 255
+    return ((x - sc["mean"]) / sc["scale"]).float()
 
 
 def predict_one(model, image_path: Path, cfg: dict) -> float:
     """One image in, one number out."""
-    raise NotImplementedError("TODO: run the model, return a float in [0, 1]")
+    return model(preprocess(image_path, cfg, model.checkpoint))
 
 
 def main() -> None:

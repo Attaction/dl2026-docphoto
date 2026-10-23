@@ -1,5 +1,50 @@
-# Tool configuration only. The package itself is not installed: PYTHONPATH is
-# set to the project root in the image, so `from src.data import ...` works.
+# In Docker, PYTHONPATH points at the project root so `from src... import ...`
+# works. Without Docker, `uv sync` installs the project in editable mode into
+# .venv, which does the same thing (including from notebooks/).
+
+[project]
+name = "dl2026-docphoto"
+version = "0.1.0"
+requires-python = ">=3.11,<3.12"
+# Mirrors the Docker image: base image torch/torchvision + requirements.txt.
+dependencies = [
+    "torch==2.4.1",
+    "torchvision==0.19.1",
+    "numpy==1.26.4",
+    "pandas==2.2.3",
+    "scipy==1.14.1",
+    "scikit-learn==1.5.2",
+    "opencv-python-headless==4.10.0.84",
+    "pillow==10.4.0",
+    "matplotlib==3.9.2",
+    "seaborn==0.13.2",
+    "pyyaml==6.0.2",
+    "tqdm==4.66.5",
+    "wandb==0.18.3",
+    "jupyterlab==4.2.5",
+    "ipywidgets==8.1.5",
+    "pytest==8.3.3",
+    "ruff==0.6.9",
+    "ipython<9",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+# Same CUDA 12.4 build as the Docker base image. Change the index to
+# https://download.pytorch.org/whl/cpu on a machine without an NVIDIA GPU.
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
 
 [tool.ruff]
 line-length = 100
